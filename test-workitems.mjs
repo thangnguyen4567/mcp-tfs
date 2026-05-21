@@ -33,7 +33,7 @@ if (refs.length > 0) {
   items.forEach((wi) => {
     const f = wi.fields;
     console.log(
-      `  #${wi.id} [${f["System.WorkItemType"]}] ${f["System.Title"]}`,
+      `  #${wi.id} [${f["System.WorkItemType"]}] ${f["System.Title"]} [${f["System.State"]}] (SP: ${f["Microsoft.VSTS.Scheduling.StoryPoints"] ?? "?"})`,
     );
     console.log(
       `       State: ${f["System.State"]} | Changed: ${f["System.ChangedDate"]}`,

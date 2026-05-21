@@ -23,6 +23,7 @@ function formatWorkItem(wi: WorkItem): string {
     `  Assigned to: ${assignedTo}`,
     `  Area: ${f['System.AreaPath'] || 'N/A'} | Iteration: ${f['System.IterationPath'] || 'N/A'}`,
     `  Changed: ${new Date(f['System.ChangedDate']).toLocaleDateString('vi-VN')}${tags}`,
+    `${f['System.WorkItemType'] === 'User Story' ? `  Story Points: ${f['Microsoft.VSTS.Scheduling.StoryPoints'] ?? 'N/A'}` : ''}`,
     description,
   ]
     .filter(Boolean)
@@ -65,7 +66,7 @@ export function registerWorkItemTools(
 
   server.tool(
     'list_my_work_items',
-    'Lấy danh sách work items được giao cho bạn (hoặc theo state/type)',
+    'Lấy danh sách work items được giao cho bạn (hoặc theo state/type) Sprint hiện tại là: ' + process.env.SPRINT_NAME,
     {
       project: z
         .string()
@@ -79,7 +80,7 @@ export function registerWorkItemTools(
       workItemType: z
         .string()
         .optional()
-        .describe('Lọc theo loại (VD: Task, Bug, User Story, Feature)'),
+        .describe('Lọc theo loại (VD: Task, Bug, User Story, Feature) Mặc định là Task'),
       top: z.number().optional().default(30).describe('Số work items tối đa'),
     },
     async ({ project, assignedTo, state, workItemType, top = 30 }) => {
@@ -111,7 +112,7 @@ export function registerWorkItemTools(
 
   server.tool(
     'query_work_items',
-    'Tìm kiếm work items bằng WIQL query tùy chỉnh hoặc từ khóa tìm kiếm',
+    'Tìm kiếm work items bằng WIQL query tùy chỉnh hoặc từ khóa tìm kiếm, Sprint hiện tại là: ' + process.env.SPRINT_NAME,
     {
       project: z
         .string()
@@ -120,7 +121,7 @@ export function registerWorkItemTools(
       wiql: z.string().optional().describe('WIQL query tùy chỉnh (nếu không nhập sẽ dùng keyword)'),
       keyword: z.string().optional().describe('Từ khóa tìm trong title của work items'),
       state: z.string().optional().describe('Lọc theo state (VD: Active, New, Resolved)'),
-      workItemType: z.string().optional().describe('Lọc theo loại (VD: Task, Bug, User Story)'),
+      workItemType: z.string().optional().describe('Lọc theo loại (VD: Task, Bug, User Story) Mặc định là Task'),
       top: z.number().optional().default(20).describe('Số kết quả tối đa'),
     },
     async ({ project, wiql, keyword, state, workItemType, top = 20 }) => {
@@ -192,7 +193,7 @@ export function registerWorkItemTools(
 
   server.tool(
     'create_work_item',
-    'Tạo mới một work item trong TFS project',
+    'Tạo mới một work item trong TFS project , ngày hiện tại là: ' + new Date().toLocaleDateString('vi-VN') + ', Sprint hiện tại là: ' + process.env.SPRINT_NAME + ' 1 Sprint kéo dài 2 tuần, deadline mặc định sẽ là cuối Sprint. Lưu ý: Task và Bug bắt buộc phải có parentId (ID của User Story cha).',
     {
       project: z
         .string()
@@ -214,6 +215,14 @@ export function registerWorkItemTools(
         .describe('Iteration path (VD: MyProject\\Sprint 1)'),
       priority: z.number().min(1).max(4).optional().describe('Độ ưu tiên: 1 (cao) – 4 (thấp)'),
       tags: z.string().optional().describe('Tags, phân cách bằng dấu chấm phẩy'),
+      storyPoints: z.number().describe('Story Points (số giờ/điểm ước tính)'),
+      deadline: z.string().describe('Deadline (ISO date, VD: 2026-06-30)'),
+      aiTime: z.number().describe('AI Time (số giờ AI hỗ trợ)'),
+      bizPoint: z.number().optional().default(0).describe('Biz Point (mặc định 0)'),
+      parentId: z
+        .number()
+        .optional()
+        .describe('ID của User Story cha (bắt buộc với Task và Bug)'),
     },
     async ({
       project,
@@ -225,8 +234,26 @@ export function registerWorkItemTools(
       iterationPath,
       priority,
       tags,
+      storyPoints,
+      deadline,
+      aiTime,
+      bizPoint,
+      parentId,
     }) => {
+      const type = workItemType.toLowerCase();
+      if ((type === 'task' || type === 'bug') && !parentId) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `❌ ${workItemType} bắt buộc phải có parentId (ID của User Story cha).`,
+            },
+          ],
+        };
+      }
+
       const proj = resolveProjectId(project);
+      const tfsBaseUrl = (tfs as any).http.defaults.baseURL as string;
       const ops: CreateWorkItemField[] = [{ op: 'add', path: '/fields/System.Title', value: title }];
 
       if (description) ops.push({ op: 'add', path: '/fields/System.Description', value: description });
@@ -241,12 +268,29 @@ export function registerWorkItemTools(
         ops.push({ op: 'add', path: '/fields/Microsoft.VSTS.Common.Priority', value: priority });
       if (tags) ops.push({ op: 'add', path: '/fields/System.Tags', value: tags });
 
+      ops.push({ op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.StoryPoints', value: storyPoints });
+      ops.push({ op: 'add', path: '/fields/VNR.Agile.Deadline', value: deadline });
+      ops.push({ op: 'add', path: '/fields/VNR.Agile.AITime', value: aiTime });
+      ops.push({ op: 'add', path: '/fields/VNR.Agile.BizPoint', value: bizPoint ?? 0 });
+
+      if (parentId) {
+        ops.push({
+          op: 'add',
+          path: '/relations/-',
+          value: {
+            rel: 'System.LinkTypes.Hierarchy-Reverse',
+            url: `${tfsBaseUrl}/_apis/wit/workitems/${parentId}`,
+            attributes: { comment: '' },
+          },
+        });
+      }
+
       const wi = await tfs.createWorkItem(proj, workItemType, ops);
       return {
         content: [
           {
             type: 'text',
-            text: `✅ Đã tạo ${workItemType} #${wi.id}: **${wi.fields['System.Title']}**\nState: ${wi.fields['System.State']}`,
+            text: `✅ Đã tạo ${workItemType} #${wi.id}: **${wi.fields['System.Title']}**\nState: ${wi.fields['System.State']}${parentId ? `\nParent: #${parentId}` : ''}`,
           },
         ],
       };
