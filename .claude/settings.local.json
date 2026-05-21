@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(node --max-old-space-size=4096 node_modules/.bin/tsc)",
+      "Bash(npx tsc:*)",
+      "Bash(where tsc:*)",
+      "Bash(NODE_OPTIONS=\"--max-old-space-size=4096\" npx tsc)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(timeout 3 node dist/index.js)",
+      "mcp__ide__getDiagnostics"
+    ]
+  }
+}

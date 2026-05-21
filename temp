@@ -1,0 +1,143 @@
+  // ─── Tool: review_pull_request (AUTO REVIEW) ─────────────────────────────
+    // server.tool(  //   'review_pull_request',
+    //   'Tự động review toàn bộ Pull Request theo rules từ file cấu hình và post comments lên TFS',
+    //   {
+    //     pullRequestId: z.number().describe('ID của Pull Request cần review'),
+    //     repositoryId: z.string().optional().describe('ID của repository'),
+    //     autoPost: z
+    //       .boolean()
+    //       .optional()
+    //       .default(false)
+    //       .describe('Tự động post comments lên TFS (mặc định: false, chỉ hiển thị kết quả)'),
+    //     fileFilter: z
+    //       .string()
+    //       .optional()
+    //       .describe('Lọc file theo pattern (VD: ".ts" để chỉ review TypeScript files)'),
+    //     reviewType: z
+    //       .enum(['frontend', 'backend', 'all'])
+    //       .optional()
+    //       .default('frontend')
+    //       .describe('Loại code cần review: frontend | backend | all'),
+    //   },
+    //   async ({ pullRequestId, repositoryId, autoPost = false, fileFilter, reviewType = 'frontend' }) => {
+    //     const repoId = resolveRepoId(repositoryId);
+    //     // 1. Load rules
+    //     const rules = loadRulesFromFiles(config.rulesFilePaths);
+    //     const systemPrompt = buildReviewSystemPrompt(rules, reviewType);
+    //     // 2. Lấy thông tin PR
+    //     const pr = await tfs.getPullRequest(repoId, pullRequestId);
+    //     // 3. Lấy danh sách files thay đổi
+    //     const changes = await tfs.getPrChanges(repoId, pullRequestId);
+    //     const entries = changes.changeEntries || [];
+    //     let filesToReview = summarizeChanges(entries);
+    //     // Filter theo reviewType
+    //     if (reviewType !== 'all') {
+    //       filesToReview = filesToReview.filter((f) => f.type === reviewType || f.type === 'other');
+    //     }
+    //     // Filter theo fileFilter nếu có
+    //     if (fileFilter) {
+    //       filesToReview = filesToReview.filter((f) => f.path.includes(fileFilter));
+    //     }
+    //     // Bỏ qua folders và file không phải code
+    //     filesToReview = filesToReview.filter((f) => {
+    //       const skipPatterns = ['.json', '.lock', '.md', '.png', '.jpg', '.svg', '.gif', '.ico', '.map'];
+    //       return !skipPatterns.some((p) => f.path.endsWith(p)) && f.changeType !== 'delete';
+    //     });
+    //     if (filesToReview.length === 0) {
+    //       return {
+    //         content: [{
+    //           type: 'text',
+    //           text: `## Review PR #${pullRequestId}: ${pr.title}\n\nKhông có files phù hợp để review.`,
+    //         }],
+    //       };
+    //     }
+    //     // 4. Review từng file
+    //     const allReviewResults: string[] = [];
+    //     const allComments: ReviewComment[] = [];
+    //     const results: string[] = [
+    //       `## 🔍 Auto Review — PR #${pullRequestId}: ${pr.title}`,
+    //       `**Author:** ${pr.createdBy.displayName}`,
+    //       `**Branch:** ${pr.sourceRefName} → ${pr.targetRefName}`,
+    //       `**Files được review:** ${filesToReview.length}`,
+    //       `**Rules từ:** ${config.rulesFilePaths.join(', ') || 'Không có rules file'}`,
+    //       '',
+    //       '---',
+    //       '',
+    //       '> **Lưu ý:** MCP này cung cấp phân tích dựa trên rules. Claude sẽ review từng file theo rules được cấu hình.',
+    //       '',
+    //       `**System Prompt (rules áp dụng):**`,
+    //       '```',
+    //       systemPrompt.substring(0, 500) + (systemPrompt.length > 500 ? '...' : ''),
+    //       '```',
+    //       '',
+    //       '---',
+    //       '',
+    //       `### Files cần review:`,
+    //       ...filesToReview.map((f) => `- [${f.changeType}] \`${f.path}\``),
+    //       '',
+    //       '---',
+    //     ];
+    //     // Lấy commits để biết commitId mới nhất
+    //     const commits = await tfs.getPrCommits(repoId, pullRequestId);
+    //     const latestCommitId = commits.length > 0 ? commits[0].commitId : undefined;
+    //     // Review từng file
+    //     for (const file of filesToReview.slice(0, 10)) { // Giới hạn 10 files để tránh quá nhiều
+    //       try {
+    //         const fileContent = await tfs.getFileContent(repoId, file.path, latestCommitId);
+    //         const filePrompt = buildFileReviewPrompt(file.path, file.changeType, fileContent);
+    //         results.push(`### 📄 ${file.path}`);
+    //         results.push(`**Change type:** ${file.changeType} | **Type:** ${file.type}`);
+    //         results.push('');
+    //         results.push('**Prompt gửi cho AI review:**');
+    //         results.push('```');
+    //         results.push(filePrompt.substring(0, 300) + '...');
+    //         results.push('```');
+    //         results.push('');
+    //         results.push('*(Claude sẽ review file này theo rules và system prompt ở trên)*');
+    //         results.push('');
+    //         results.push('---');
+    //         results.push('');
+    //         allReviewResults.push(`File: ${file.path}\n${filePrompt}`);
+    //       } catch (err) {
+    //         results.push(`### ⚠️ ${file.path}`);
+    //         results.push(`Không thể đọc file: ${err}`);
+    //         results.push('');
+    //       }
+    //     }
+    //     if (filesToReview.length > 10) {
+    //       results.push(`> ⚠️ Chỉ review 10/${filesToReview.length} files đầu tiên. Để review thêm, gọi lại tool với \`fileFilter\`.`);
+    //     }
+    //     // Summary for AI review
+    //     results.push('');
+    //     results.push('## 📋 Tóm tắt để AI Review');
+    //     results.push('');
+    //     results.push('**System Prompt (Rules):**');
+    //     results.push('```');
+    //     results.push(systemPrompt);
+    //     results.push('```');
+    //     results.push('');
+    //     results.push('**Files và nội dung cần review (hãy review từng file theo rules trên):**');
+    //     results.push('```');
+    //     results.push(allReviewResults.join('\n\n=== NEXT FILE ===\n\n'));
+    //     results.push('```');
+    //     if (autoPost && allComments.length > 0) {
+    //       results.push('');
+    //       results.push(`### 📤 Auto-posting ${allComments.length} comments lên TFS...`);
+    //       let posted = 0;
+    //       for (const comment of allComments) {
+    //         try {
+    //           await tfs.createThread(repoId, pullRequestId, {
+    //             comments: [{ parentCommentId: 0, content: comment.content, commentType: 1 }],
+    //             status: 1,
+    //             threadContext: comment.filePath ? { filePath: comment.filePath } : undefined,
+    //           });
+    //           posted++;
+    //         } catch (err) {
+    //           results.push(`  ⚠️ Lỗi post comment: ${err}`);
+    //         }
+    //       }
+    //       results.push(`  ✅ Đã post ${posted}/${allComments.length} comments`);
+    //     }
+    //     return { content: [{ type: 'text', text: results.join('\n') }] };
+    //   }
+    // );
