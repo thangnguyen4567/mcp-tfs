@@ -3,6 +3,7 @@ import { z } from 'zod';
 import * as Diff from 'diff';
 import { TfsClient } from './tfs-client.js';
 import { summarizeChanges } from './review-engine.js';
+import { CreateThreadRequest } from './models.js';
 
 const VOTE_MAP = {
     approve: 10,
@@ -299,7 +300,7 @@ export function registerPullRequestTools(server: McpServer, tfs: TfsClient, defa
 
             const statusMap = { active: 1, fixed: 2, wontFix: 3, closed: 4, byDesign: 5, pending: 6 };
 
-            const request: import('./tfs-client.js').CreateThreadRequest = {
+            const request: CreateThreadRequest = {
                 comments: [{ parentCommentId: 0, content, commentType: 1 }],
                 status: statusMap[status],
             };
@@ -326,6 +327,72 @@ export function registerPullRequestTools(server: McpServer, tfs: TfsClient, defa
         }
     );
 
+    // ─── Tool: get_pr_unresolved_comments ───────────────────────────────────
+
+    server.tool(
+        'get_pr_unresolved_comments',
+        'Lấy danh sách các comment cần resolve (status: active/pending) trong Pull Request',
+        {
+            pullRequestId: z.number().describe('ID của Pull Request'),
+            repositoryId: z.string().optional().describe('ID của repository'),
+        },
+        async ({ pullRequestId, repositoryId }) => {
+            const repoId = resolveRepoId(repositoryId);
+            const allThreads = await tfs.getPrThreads(repoId, pullRequestId);
+
+            // Chỉ lấy thread chưa deleted và có status active (1) hoặc pending (6)
+            const unresolvedThreads = allThreads.filter(
+                (t) => !t.isDeleted && (t.status === '1' || t.status === '6')
+            );
+
+            if (unresolvedThreads.length === 0) {
+                return {
+                    content: [{ type: 'text', text: `✅ PR #${pullRequestId} không còn comment nào cần resolve.` }],
+                };
+            }
+
+            const statusLabel: Record<string, string> = {
+                '1': 'Active 💬',
+                '6': 'Pending ⏳',
+            };
+
+            const text = unresolvedThreads
+                .map((t) => {
+                    const activeComments = t.comments.filter((c) => !c.isDeleted);
+                    if (activeComments.length === 0) return '';
+
+                    const firstComment = activeComments[0];
+                    const file = t.threadContext?.filePath ? `📄 \`${t.threadContext.filePath}\`` : '📝 General';
+                    const line = t.threadContext?.rightFileStart ? ` (line ${t.threadContext.rightFileStart.line})` : '';
+                    const status = statusLabel[t.status] ?? `Status ${t.status}`;
+
+                    const commentsText = activeComments
+                        .map((c, idx) => {
+                            const prefix = idx === 0 ? '  💬' : '  ↩️';
+                            return `${prefix} **${c.author.displayName}:** ${c.content}`;
+                        })
+                        .join('\n');
+
+                    return [
+                        `### Thread #${t.id} — ${status}`,
+                        `${file}${line}`,
+                        commentsText,
+                    ].join('\n');
+                })
+                .filter(Boolean)
+                .join('\n\n---\n\n');
+
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: `## ⚠️ Comments cần resolve trong PR #${pullRequestId} (${unresolvedThreads.length} thread)\n\n${text}`,
+                    },
+                ],
+            };
+        }
+    );
+
     // ─── Tool: vote_pull_request ─────────────────────────────────────────────
 
     server.tool(
@@ -344,7 +411,7 @@ export function registerPullRequestTools(server: McpServer, tfs: TfsClient, defa
         },
         async ({ pullRequestId, repositoryId, vote, reviewerId }) => {
             const repoId = resolveRepoId(repositoryId);
-            const rid = reviewerId;
+            const rid = reviewerId || process.env.TFS_USER_ID;
             if (!rid) throw new Error('reviewerId is required (or set TFS_USER_ID in env)');
 
             const voteValue = VOTE_MAP[vote as VoteLabel];

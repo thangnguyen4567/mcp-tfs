@@ -1,10 +1,21 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { TfsClient, WorkItem, CreateWorkItemField } from './tfs-client.js';
-
+import {
+  WorkItem,
+  CreateWorkItemField,
+  WorkItemRelation,
+} from './models.js';
 // ─── Helper: format work item ─────────────────────────────────────────────────
+import { TfsClient } from './tfs-client.js';
 
-function formatWorkItem(wi: WorkItem): string {
+function getWorkItemUrl(id: number): string {
+  const baseUrl = process.env.TFS_BASE_URL || '';
+  const collection = process.env.TFS_COLLECTION || 'DefaultCollection';
+  const project = process.env.TFS_DEFAULT_PROJECT_ID || '';
+  return `${baseUrl}/${collection}/${project}/_workitems/edit/${id}`;
+}
+
+function formatWorkItem(wi: WorkItem, childSummary?: string, linksSummary?: string, attachmentsSummary?: string): string {
   const f = wi.fields;
   const assignedTo =
     typeof f['System.AssignedTo'] === 'object' && f['System.AssignedTo']
@@ -17,17 +28,102 @@ function formatWorkItem(wi: WorkItem): string {
   const description = f['System.Description']
     ? `\n  Description: ${f['System.Description'].replace(/<[^>]+>/g, '').substring(0, 200)}${f['System.Description'].length > 200 ? '...' : ''}`
     : '';
+  const url = getWorkItemUrl(wi.id);
   return [
-    `### #${wi.id}: ${f['System.Title']}`,
+    `### #${wi.id}: [${f['System.Title']}](${url})`,
     `  Type: ${f['System.WorkItemType']} | State: ${f['System.State']}${priority}`,
     `  Assigned to: ${assignedTo}`,
     `  Area: ${f['System.AreaPath'] || 'N/A'} | Iteration: ${f['System.IterationPath'] || 'N/A'}`,
     `  Changed: ${new Date(f['System.ChangedDate']).toLocaleDateString('vi-VN')}${tags}`,
     `${f['System.WorkItemType'] === 'User Story' ? `  Story Points: ${f['Microsoft.VSTS.Scheduling.StoryPoints'] ?? 'N/A'}` : ''}`,
+    childSummary ? childSummary : '',
+    linksSummary ? linksSummary : '',
+    attachmentsSummary ? attachmentsSummary : '',
     description,
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/**
+ * Lấy child task IDs từ relations của User Story
+ */
+function getChildIds(wi: WorkItem): number[] {
+  if (!wi.relations) return [];
+  return wi.relations
+    .filter((r) => r.rel === 'System.LinkTypes.Hierarchy-Forward')
+    .map((r) => {
+      const match = r.url.match(/\/workItems\/(\d+)$/i);
+      return match ? parseInt(match[1], 10) : 0;
+    })
+    .filter((id) => id > 0);
+}
+
+/**
+ * Lấy links (non-child, non-parent relations) từ User Story
+ */
+function getLinks(wi: WorkItem): WorkItemRelation[] {
+  if (!wi.relations) return [];
+  return wi.relations.filter(
+    (r) =>
+      r.rel !== 'System.LinkTypes.Hierarchy-Forward' &&
+      r.rel !== 'System.LinkTypes.Hierarchy-Reverse' &&
+      r.rel !== 'AttachedFile'
+  );
+}
+
+/**
+ * Lấy attachments từ User Story
+ */
+function getAttachments(wi: WorkItem): WorkItemRelation[] {
+  if (!wi.relations) return [];
+  return wi.relations.filter((r) => r.rel === 'AttachedFile');
+}
+
+/**
+ * Format links summary
+ */
+function formatLinksSummary(links: WorkItemRelation[]): string {
+  if (links.length === 0) return '';
+  const lines = links.map((l) => {
+    const name = (l.attributes['name'] as string) || (l.attributes['comment'] as string) || '';
+    const relType = l.rel.replace('System.LinkTypes.', '').replace('-', ' ');
+    const idMatch = l.url.match(/\/workItems\/(\d+)$/i);
+    const id = idMatch ? `#${idMatch[1]}` : l.url;
+    return `    🔗 ${relType}: ${id}${name ? ` (${name})` : ''}`;
+  });
+  return `  🔗 Links (${links.length}):\n${lines.join('\n')}`;
+}
+
+/**
+ * Format attachments summary
+ */
+function formatAttachmentsSummary(attachments: WorkItemRelation[]): string {
+  if (attachments.length === 0) return '';
+  const lines = attachments.map((a) => {
+    const name = (a.attributes['name'] as string) || 'attachment';
+    const url = a.url;
+    return `    📎 [${name}](${url})`;
+  });
+  return `  📎 Attachments (${attachments.length}):\n${lines.join('\n')}`;
+}
+
+/**
+ * Format child tasks summary cho User Story
+ */
+function formatChildSummary(children: WorkItem[]): string {
+  if (children.length === 0) return '  📋 Child Tasks: (none)';
+  const lines = children.map((c) => {
+    const state = c.fields['System.State'];
+    const icon = state === 'Closed' || state === 'Done' ? '✅' : state === 'Active' ? '🔵' : '⚪';
+    const assignedTo =
+      typeof c.fields['System.AssignedTo'] === 'object' && c.fields['System.AssignedTo']
+        ? (c.fields['System.AssignedTo'] as { displayName: string }).displayName
+        : (c.fields['System.AssignedTo'] as string) || 'Unassigned';
+    return `    ${icon} #${c.id}: ${c.fields['System.Title']} [${state}] - ${assignedTo}`;
+  });
+  const done = children.filter((c) => c.fields['System.State'] === 'Closed' || c.fields['System.State'] === 'Done').length;
+  return `  📋 Child Tasks: ${done}/${children.length} done\n${lines.join('\n')}`;
 }
 
 // ─── Register Work Item Tools ─────────────────────────────────────────────────
@@ -100,8 +196,48 @@ export function registerWorkItemTools(
         return { content: [{ type: 'text', text: 'Không có work items nào phù hợp.' }] };
       }
 
-      const items = await tfs.getWorkItemsByIds(refs.map((r) => r.id));
-      const text = items.map(formatWorkItem).join('\n\n');
+      const ids = refs.map((r) => r.id);
+      const items = await tfs.getWorkItemsByIds(ids);
+
+      // Nếu có User Story, lấy relations để hiển thị child tasks, links, attachments
+      const userStories = items.filter((i) => i.fields['System.WorkItemType'] === 'User Story');
+      let childMap: Map<number, WorkItem[]> = new Map();
+      let linksMap: Map<number, WorkItemRelation[]> = new Map();
+      let attachmentsMap: Map<number, WorkItemRelation[]> = new Map();
+
+      if (userStories.length > 0) {
+        const usWithRelations = await tfs.getWorkItemsByIdsWithRelations(userStories.map((us) => us.id));
+        const allChildIds: number[] = [];
+        const usChildMap: Map<number, number[]> = new Map();
+
+        for (const us of usWithRelations) {
+          const childIds = getChildIds(us);
+          usChildMap.set(us.id, childIds);
+          allChildIds.push(...childIds);
+          linksMap.set(us.id, getLinks(us));
+          attachmentsMap.set(us.id, getAttachments(us));
+        }
+
+        if (allChildIds.length > 0) {
+          const uniqueChildIds = [...new Set(allChildIds)];
+          const childItems = await tfs.getWorkItemsByIds(uniqueChildIds);
+          const childItemMap = new Map(childItems.map((c) => [c.id, c]));
+
+          for (const [usId, childIds] of usChildMap) {
+            childMap.set(usId, childIds.map((id) => childItemMap.get(id)).filter(Boolean) as WorkItem[]);
+          }
+        }
+      }
+
+      const text = items.map((item) => {
+        const isUS = item.fields['System.WorkItemType'] === 'User Story';
+        const children = childMap.get(item.id);
+        const childSummary = isUS ? formatChildSummary(children || []) : undefined;
+        const linksSummary = isUS ? formatLinksSummary(linksMap.get(item.id) || []) : undefined;
+        const attachmentsSummary = isUS ? formatAttachmentsSummary(attachmentsMap.get(item.id) || []) : undefined;
+        return formatWorkItem(item, childSummary, linksSummary, attachmentsSummary);
+      }).join('\n\n');
+
       return {
         content: [{ type: 'text', text: `## Work Items (${items.length})\n\n${text}` }],
       };
@@ -143,7 +279,46 @@ export function registerWorkItemTools(
       }
 
       const items = await tfs.getWorkItemsByIds(refs.map((r) => r.id));
-      const text = items.map(formatWorkItem).join('\n\n');
+
+      // Nếu có User Story, lấy relations để hiển thị child tasks, links, attachments
+      const userStories = items.filter((i) => i.fields['System.WorkItemType'] === 'User Story');
+      let childMap: Map<number, WorkItem[]> = new Map();
+      let linksMap: Map<number, WorkItemRelation[]> = new Map();
+      let attachmentsMap: Map<number, WorkItemRelation[]> = new Map();
+
+      if (userStories.length > 0) {
+        const usWithRelations = await tfs.getWorkItemsByIdsWithRelations(userStories.map((us) => us.id));
+        const allChildIds: number[] = [];
+        const usChildMap: Map<number, number[]> = new Map();
+
+        for (const us of usWithRelations) {
+          const childIds = getChildIds(us);
+          usChildMap.set(us.id, childIds);
+          allChildIds.push(...childIds);
+          linksMap.set(us.id, getLinks(us));
+          attachmentsMap.set(us.id, getAttachments(us));
+        }
+
+        if (allChildIds.length > 0) {
+          const uniqueChildIds = [...new Set(allChildIds)];
+          const childItems = await tfs.getWorkItemsByIds(uniqueChildIds);
+          const childItemMap = new Map(childItems.map((c) => [c.id, c]));
+
+          for (const [usId, childIds] of usChildMap) {
+            childMap.set(usId, childIds.map((id) => childItemMap.get(id)).filter(Boolean) as WorkItem[]);
+          }
+        }
+      }
+
+      const text = items.map((item) => {
+        const isUS = item.fields['System.WorkItemType'] === 'User Story';
+        const children = childMap.get(item.id);
+        const childSummary = isUS ? formatChildSummary(children || []) : undefined;
+        const linksSummary = isUS ? formatLinksSummary(linksMap.get(item.id) || []) : undefined;
+        const attachmentsSummary = isUS ? formatAttachmentsSummary(attachmentsMap.get(item.id) || []) : undefined;
+        return formatWorkItem(item, childSummary, linksSummary, attachmentsSummary);
+      }).join('\n\n');
+
       return {
         content: [{ type: 'text', text: `## Kết quả tìm kiếm (${items.length})\n\n${text}` }],
       };
@@ -159,15 +334,19 @@ export function registerWorkItemTools(
       id: z.number().describe('ID của work item'),
     },
     async ({ id }) => {
-      const wi = await tfs.getWorkItem(id);
+      // Lấy work item với relations để có đầy đủ links, attachments, child tasks
+      const wiArr = await tfs.getWorkItemsByIdsWithRelations([id]);
+      if (wiArr.length === 0) throw new Error(`Work item #${id} not found`);
+      const wi = wiArr[0];
       const f = wi.fields;
       const assignedTo =
         typeof f['System.AssignedTo'] === 'object' && f['System.AssignedTo']
           ? (f['System.AssignedTo'] as { displayName: string; uniqueName: string })
           : null;
 
+      const url = getWorkItemUrl(wi.id);
       const lines = [
-        `## Work Item #${wi.id}: ${f['System.Title']}`,
+        `## Work Item #${wi.id}: [${f['System.Title']}](${url})`,
         '',
         `**Type:** ${f['System.WorkItemType']}  |  **State:** ${f['System.State']}`,
         `**Project:** ${f['System.TeamProject'] || 'N/A'}`,
@@ -175,6 +354,7 @@ export function registerWorkItemTools(
         `**Area:** ${f['System.AreaPath'] || 'N/A'}`,
         `**Iteration:** ${f['System.IterationPath'] || 'N/A'}`,
         `**Priority:** ${f['Microsoft.VSTS.Common.Priority'] ?? 'N/A'}`,
+        `**Story Points:** ${f['Microsoft.VSTS.Scheduling.StoryPoints'] ?? 'N/A'}`,
         `**Tags:** ${f['System.Tags'] || 'None'}`,
         `**Created:** ${new Date(f['System.CreatedDate']).toLocaleString('vi-VN')}`,
         `**Last changed:** ${new Date(f['System.ChangedDate']).toLocaleString('vi-VN')}`,
@@ -183,6 +363,25 @@ export function registerWorkItemTools(
       if (f['System.Description']) {
         const cleanDesc = f['System.Description'].replace(/<[^>]+>/g, '').trim();
         lines.push('', '### Description', cleanDesc);
+      }
+
+      // Child tasks
+      const childIds = getChildIds(wi);
+      if (childIds.length > 0) {
+        const childItems = await tfs.getWorkItemsByIds(childIds);
+        lines.push('', formatChildSummary(childItems));
+      }
+
+      // Links
+      const links = getLinks(wi);
+      if (links.length > 0) {
+        lines.push('', formatLinksSummary(links));
+      }
+
+      // Attachments
+      const attachments = getAttachments(wi);
+      if (attachments.length > 0) {
+        lines.push('', formatAttachmentsSummary(attachments));
       }
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };

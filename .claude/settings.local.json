@@ -9,7 +9,13 @@
       "Bash(NODE_OPTIONS=\"--max-old-space-size=4096\" npx tsc)",
       "Bash(echo \"EXIT: $?\")",
       "Bash(timeout 3 node dist/index.js)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "mcp__tfs-review__list_repositories",
+      "mcp__tfs-review__list_pull_requests",
+      "mcp__tfs-review__get_pr_unresolved_comments",
+      "mcp__tfs-review__get_pr_changes",
+      "mcp__tfs-review__get_pr_threads",
+      "mcp__tfs-review__get_pr_file_diff"
     ]
   }
 }

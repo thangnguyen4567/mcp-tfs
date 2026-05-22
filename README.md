@@ -79,9 +79,9 @@ Mở browser tại `http://localhost:5173` để gọi tool qua UI.
 
 ### Repository
 
-| Tool                | Mô tả                                 |
-| ------------------- | ------------------------------------- |
-| `list_repositories` | Liệt kê tất cả repos trong collection |
+| Tool                | Mô tả                                        |
+| ------------------- | -------------------------------------------- |
+| `list_repositories` | Liệt kê tất cả repos trong collection        |
 | `list_projects`     | Liệt kê tất cả projects trong TFS collection |
 
 ### Pull Request
@@ -116,13 +116,13 @@ Mở browser tại `http://localhost:5173` để gọi tool qua UI.
 
 ### Work Items
 
-| Tool                  | Mô tả                                                                                         |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| `list_my_work_items`  | Danh sách work items được giao cho bạn (`@Me`) hoặc người khác, filter theo state / type      |
-| `query_work_items`    | Tìm kiếm work items bằng từ khóa hoặc WIQL query tùy chỉnh                                   |
-| `get_work_item`       | Chi tiết đầy đủ của 1 work item (description, area, iteration, priority, tags, …)            |
-| `create_work_item`    | Tạo mới work item (Task / Bug / User Story / Feature / Epic / Issue)                          |
-| `update_work_item`    | Cập nhật state, tiêu đề, người được giao, iteration, tags, thêm comment history              |
+| Tool                 | Mô tả                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| `list_my_work_items` | Danh sách work items được giao cho bạn (`@Me`) hoặc người khác, filter theo state / type |
+| `query_work_items`   | Tìm kiếm work items bằng từ khóa hoặc WIQL query tùy chỉnh                               |
+| `get_work_item`      | Chi tiết đầy đủ của 1 work item (description, area, iteration, priority, tags, …)        |
+| `create_work_item`   | Tạo mới work item (Task / Bug / User Story / Feature / Epic / Issue)                     |
+| `update_work_item`   | Cập nhật state, tiêu đề, người được giao, iteration, tags, thêm comment history          |
 
 #### Ví dụ sử dụng Work Items
 
@@ -166,3 +166,59 @@ src/
 - **Work Item relations**: thêm API liên kết work items (link PR → Task)
 - **Auto approve**: sử dụng `vote_pull_request` tool sau khi review xong
 - **Notification**: webhook khi work item thay đổi state
+
+## Hướng dẫn sử dụng các API phổ biến của TFS
+
+### Lấy danh sách repository Git trong Collection TFS
+
+```
+http://hcm-srv-tfscore01:8080/tfs/DefaultCollection/_apis/git/repositories
+```
+
+- Trả về danh sách các Git repos thuộc collection.
+- Cần xác thực bằng Personal Access Token hoặc Basic Auth.
+
+Ví dụ response:
+
+```json
+{
+  "count": 2,
+  "value": [
+    { "id": "...", "name": "Repo1", ... },
+    { "id": "...", "name": "Repo2", ... }
+  ]
+}
+```
+
+---
+
+### Lấy thông tin kết nối & dịch vụ TFS (Connection Data)
+
+```
+http://hcm-srv-tfscore01:8080/tfs/DefaultCollection/_apis/connectionData?connectOptions=IncludeServices&lastChangeId=-1&lastChangeId64=-1
+```
+
+- Trả về metadata hệ thống, định nghĩa service, thông tin dịch vụ và trạng thái server, project list...
+
+Ví dụ response rút gọn:
+
+```json
+{
+  "authenticatedUser": {...},
+  "deploymentType": "OnPremises",
+  "locationServiceData": {
+    "serviceDefinitions": [
+      { "serviceType": "TFS", "displayName": "Team Foundation Server", ... },
+      ...
+    ],
+    ...
+  },
+  ...
+}
+```
+
+---
+
+- Các API trên đều yêu cầu xác thực: Personal Access Token hoặc Basic Auth.
+- Tham số `api-version` có thể điều chỉnh theo version TFS server.
+- Có thể test nhanh bằng curl, Postman với tài khoản có quyền truy cập TFS.
