@@ -298,6 +298,9 @@ export class TfsClient {
       'System.TeamProject',
       'Microsoft.VSTS.Common.Priority',
       "Microsoft.VSTS.Scheduling.StoryPoints",
+      'Microsoft.VSTS.Scheduling.OriginalEstimate',
+      'Microsoft.VSTS.Scheduling.RemainingWork',
+      'Microsoft.VSTS.Scheduling.CompletedWork',
       'System.Tags',
     ];
     const res = await this.http.get('/_apis/wit/workitems', {

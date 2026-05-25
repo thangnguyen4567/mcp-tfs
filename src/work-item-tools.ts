@@ -36,6 +36,7 @@ function formatWorkItem(wi: WorkItem, childSummary?: string, linksSummary?: stri
     `  Area: ${f['System.AreaPath'] || 'N/A'} | Iteration: ${f['System.IterationPath'] || 'N/A'}`,
     `  Changed: ${new Date(f['System.ChangedDate']).toLocaleDateString('vi-VN')}${tags}`,
     `${f['System.WorkItemType'] === 'User Story' ? `  Story Points: ${f['Microsoft.VSTS.Scheduling.StoryPoints'] ?? 'N/A'}` : ''}`,
+    `${f['System.WorkItemType'] === 'Task' ? `  Original Estimate: ${f['Microsoft.VSTS.Scheduling.OriginalEstimate'] ?? 'N/A'} | Remaining: ${f['Microsoft.VSTS.Scheduling.RemainingWork'] ?? 'N/A'} | Completed: ${f['Microsoft.VSTS.Scheduling.CompletedWork'] ?? 'N/A'}` : ''}`,
     childSummary ? childSummary : '',
     linksSummary ? linksSummary : '',
     attachmentsSummary ? attachmentsSummary : '',
@@ -162,7 +163,7 @@ export function registerWorkItemTools(
 
   server.tool(
     'list_my_work_items',
-    'Lấy danh sách work items được giao cho bạn (hoặc theo state/type) Sprint hiện tại là: ' + process.env.SPRINT_NAME,
+    'Lấy danh sách work items được giao cho bạn (hoặc theo state/type) ',
     {
       project: z
         .string()
@@ -248,7 +249,7 @@ export function registerWorkItemTools(
 
   server.tool(
     'query_work_items',
-    'Tìm kiếm work items bằng WIQL query tùy chỉnh hoặc từ khóa tìm kiếm, Sprint hiện tại là: ' + process.env.SPRINT_NAME,
+    'Tìm kiếm work items bằng WIQL query tùy chỉnh hoặc từ khóa tìm kiếm, Sprint hiện tại là: ',
     {
       project: z
         .string()
@@ -392,7 +393,7 @@ export function registerWorkItemTools(
 
   server.tool(
     'create_work_item',
-    'Tạo mới một work item trong TFS project , ngày hiện tại là: ' + new Date().toLocaleDateString('vi-VN') + ', Sprint hiện tại là: ' + process.env.SPRINT_NAME + ' 1 Sprint kéo dài 2 tuần, deadline mặc định sẽ là cuối Sprint. Lưu ý: Task và Bug bắt buộc phải có parentId (ID của User Story cha).',
+    'Tạo mới một work item trong TFS project , ngày hiện tại là: ' + new Date().toLocaleDateString('vi-VN') + ', deadline mặc định sẽ là cuối Sprint. Lưu ý: Task và Bug bắt buộc phải có parentId (ID của User Story cha).',
     {
       project: z
         .string()
@@ -500,41 +501,73 @@ export function registerWorkItemTools(
 
   server.tool(
     'update_work_item',
-    'Cập nhật thông tin một work item (state, tiêu đề, người được giao, v.v.)',
+    'Cập nhật thông tin một work item (state, tiêu đề, người được giao, v.v.), Khi chuyển type US sang trạng thái active thì các field deadline,aiTime,bizPoint,storyPoints phải có dữ liệu => nếu chưa có thì thêm dữ liệu vào các trường này trước r mới update state. Nếu cập nhật người được giao thì có thể dùng @Me để tự động resolve thành email của người dùng hiện tại (dựa trên TFS_DEFAULT_ASSIGNED_TO).',
     {
       id: z.number().describe('ID của work item cần cập nhật'),
       title: z.string().optional().describe('Tiêu đề mới'),
+      description: z.string().optional().describe('Mô tả mới'),
       state: z
         .string()
         .optional()
         .describe('Trạng thái mới (VD: Active, Resolved, Closed, New)'),
       assignedTo: z.string().optional().describe('Email người được giao mới'),
-      description: z.string().optional().describe('Mô tả mới'),
       areaPath: z.string().optional().describe('Area path mới'),
       iterationPath: z.string().optional().describe('Iteration path mới'),
       priority: z.number().min(1).max(4).optional().describe('Độ ưu tiên mới (1–4)'),
       tags: z.string().optional().describe('Tags mới (ghi đè toàn bộ)'),
+      storyPoints: z.number().optional().describe('Story Points mới (số giờ/điểm ước tính)'),
+      deadline: z.string().optional().describe('Deadline mới (ISO date, VD: 2026-06-30)'),
+      aiTime: z.number().optional().describe('AI Time mới (số giờ AI hỗ trợ)'),
+      bizPoint: z.number().optional().describe('Biz Point mới'),
+      parentId: z
+        .number()
+        .optional()
+        .describe('ID của User Story cha (bắt buộc với Task và Bug)'),
       comment: z.string().optional().describe('Comment khi thay đổi (history note)'),
+      originalEstimate: z.number().optional().describe('Original Estimate (giờ làm việc dự kiến) - chỉ dùng cho Task'),
+      remainingWork: z.number().optional().describe('Remaining Work (giờ làm việc còn lại) - chỉ dùng cho Task'),
+      completedWork: z.number().optional().describe('Completed Work (giờ làm việc đã hoàn thành) - chỉ dùng cho Task'),
     },
     async ({
       id,
       title,
+      description,
       state,
       assignedTo,
-      description,
       areaPath,
       iterationPath,
       priority,
       tags,
+      storyPoints,
+      deadline,
+      aiTime,
+      bizPoint,
+      parentId,
       comment,
+      originalEstimate,
+      remainingWork,
+      completedWork,
     }) => {
       const ops: CreateWorkItemField[] = [];
+
       if (title) ops.push({ op: 'replace', path: '/fields/System.Title', value: title });
+      if (description) ops.push({ op: 'replace', path: '/fields/System.Description', value: description });
       if (state) ops.push({ op: 'replace', path: '/fields/System.State', value: state });
-      if (assignedTo !== undefined)
-        ops.push({ op: 'replace', path: '/fields/System.AssignedTo', value: assignedTo });
-      if (description)
-        ops.push({ op: 'replace', path: '/fields/System.Description', value: description });
+      if (assignedTo !== undefined) {
+        const resolvedAssignee =
+          assignedTo.toLowerCase() === '@me' ? defaultAssignedTo : assignedTo;
+        if (!resolvedAssignee) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: '❌ Không thể resolve @Me: chưa cấu hình TFS_DEFAULT_ASSIGNED_TO trong env.',
+              },
+            ],
+          };
+        }
+        ops.push({ op: 'replace', path: '/fields/System.AssignedTo', value: resolvedAssignee });
+      }
       if (areaPath) ops.push({ op: 'replace', path: '/fields/System.AreaPath', value: areaPath });
       if (iterationPath)
         ops.push({ op: 'replace', path: '/fields/System.IterationPath', value: iterationPath });
@@ -542,6 +575,25 @@ export function registerWorkItemTools(
         ops.push({ op: 'replace', path: '/fields/Microsoft.VSTS.Common.Priority', value: priority });
       if (tags !== undefined)
         ops.push({ op: 'replace', path: '/fields/System.Tags', value: tags });
+      if (storyPoints !== undefined)
+        ops.push({ op: 'replace', path: '/fields/Microsoft.VSTS.Scheduling.StoryPoints', value: storyPoints });
+      if (deadline !== undefined)
+        ops.push({ op: 'replace', path: '/fields/VNR.Agile.Deadline', value: deadline });
+      if (aiTime !== undefined)
+        ops.push({ op: 'replace', path: '/fields/VNR.Agile.AITime', value: aiTime });
+      if (originalEstimate !== undefined)
+        ops.push({ op: 'replace', path: '/fields/Microsoft.VSTS.Scheduling.OriginalEstimate', value: originalEstimate });
+      if (remainingWork !== undefined)
+        ops.push({ op: 'replace', path: '/fields/Microsoft.VSTS.Scheduling.RemainingWork', value: remainingWork });
+      if (completedWork !== undefined)
+        ops.push({ op: 'replace', path: '/fields/Microsoft.VSTS.Scheduling.CompletedWork', value: completedWork });
+      if (bizPoint !== undefined)
+        ops.push({ op: 'replace', path: '/fields/VNR.Agile.BizPoint', value: bizPoint });
+      if (parentId) {
+        // ParentId update: xóa các quan hệ parent cũ, thêm mới quan hệ Parent
+        // (Nên cân nhắc, do TFS có thể không cho phép sửa parent bằng PATCH này. Bỏ qua nếu không cần)
+        // Thường update parent phải dùng API relation riêng biệt, cần test nếu muốn thực hiện
+      }
       if (comment) ops.push({ op: 'add', path: '/fields/System.History', value: comment });
 
       if (ops.length === 0) {
