@@ -7,6 +7,7 @@ import {
 } from './models.js';
 // ─── Helper: format work item ─────────────────────────────────────────────────
 import { TfsClient } from './tfs-client.js';
+import { readWordAsHtml, sanitizeHtmlForTfs, validateWordFile, verifyContentLength } from './word-service.js';
 
 function getWorkItemUrl(id: number): string {
   const baseUrl = process.env.TFS_BASE_URL || '';
@@ -609,6 +610,146 @@ export function registerWorkItemTools(
           {
             type: 'text',
             text: `✅ Đã cập nhật Work Item #${wi.id}: **${f['System.Title']}**\nState: ${f['System.State']}`,
+          },
+        ],
+      };
+    }
+  );
+
+  // ─── Tool: read_word_content ───────────────────────────────────────────────
+
+  server.tool(
+    'read_word_content',
+    'Đọc file Word (.docx) từ đường dẫn local và convert sang HTML (bảng trong Word → <table>). Trả về HTML đã làm sạch để có thể ghi vào Description của work item (qua tool update_work_item_description). Dùng khi muốn chèn nội dung có bảng từ Word vào TFS.',
+    {
+      filePath: z
+        .string()
+        .describe('Đường dẫn tuyệt đối tới file .docx (VD: D:\\docs\\spec.docx)'),
+      sanitize: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe('Làm sạch HTML cho TFS (bỏ class, bơm border cho table/cell). Mặc định: true'),
+    },
+    async ({ filePath, sanitize = true }) => {
+      const validationError = validateWordFile(filePath);
+      if (validationError) {
+        return { content: [{ type: 'text', text: `❌ ${validationError}` }] };
+      }
+
+      try {
+        const rawHtml = await readWordAsHtml(filePath);
+        const html = sanitize ? sanitizeHtmlForTfs(rawHtml) : rawHtml;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✅ Đã đọc file Word (${sanitize ? 'đã làm sạch' : 'raw'}):\n\n${html}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `❌ Lỗi đọc file Word: ${err instanceof Error ? err.message : String(err)}` }],
+        };
+      }
+    }
+  );
+
+  // ─── Tool: update_work_item_description ─────────────────────────────────────
+
+  server.tool(
+    'update_work_item_description',
+    'Ghi HTML vào field Description (System.Description) của một work item. GHI ĐÈ toàn bộ Description cũ. Thường dùng kết hợp với read_word_content để chèn nội dung có bảng từ Word vào TFS.',
+    {
+      id: z.number().describe('ID của work item cần cập nhật Description'),
+      html: z
+        .string()
+        .describe('Nội dung HTML để ghi vào Description (hỗ trợ <table>, <ul>, <b>, v.v.)'),
+    },
+    async ({ id, html }) => {
+      const ops: CreateWorkItemField[] = [
+        { op: 'replace', path: '/fields/System.Description', value: html },
+      ];
+
+      const wi = await tfs.updateWorkItem(id, ops);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Đã cập nhật Description cho Work Item #${wi.id}: **${wi.fields['System.Title']}**`,
+          },
+        ],
+      };
+    }
+  );
+
+  // ─── Tool: insert_word_to_description ──────────────────────────────────────
+
+  server.tool(
+    'insert_word_to_description',
+    'Đọc file Word (.docx) và ghi THẲNG nội dung (kèm bảng) vào Description của work item — TOÀN BỘ xử lý trong server, HTML KHÔNG đi qua AI nên không bị cắt với file dài. Tự kiểm tra lại sau khi ghi (verify-after-write). Dùng tool này cho file Word dài; GHI ĐÈ Description cũ.',
+    {
+      id: z.number().describe('ID của work item cần ghi Description'),
+      filePath: z
+        .string()
+        .describe('Đường dẫn tuyệt đối tới file .docx (VD: D:\\docs\\spec.docx)'),
+      sanitize: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe('Làm sạch HTML cho TFS (bỏ class, bơm border cho table/cell). Mặc định: true'),
+    },
+    async ({ id, filePath, sanitize = true }) => {
+      const validationError = validateWordFile(filePath);
+      if (validationError) {
+        return { content: [{ type: 'text', text: `❌ ${validationError}` }] };
+      }
+
+      let html: string;
+      try {
+        const rawHtml = await readWordAsHtml(filePath);
+        html = sanitize ? sanitizeHtmlForTfs(rawHtml) : rawHtml;
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `❌ Lỗi đọc file Word: ${err instanceof Error ? err.message : String(err)}` }],
+        };
+      }
+
+      // PATCH (ghi đè Description)
+      const ops: CreateWorkItemField[] = [
+        { op: 'replace', path: '/fields/System.Description', value: html },
+      ];
+      const wi = await tfs.updateWorkItem(id, ops);
+
+      // Verify-after-write: đọc lại Description từ TFS và so độ dài text
+      const stored = await tfs.getWorkItem(id, ['System.Description']);
+      const storedHtml = (stored.fields['System.Description'] as string) || '';
+      const check = verifyContentLength(html, storedHtml);
+
+      if (!check.ok) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `❌ Nội dung có thể bị cắt khi ghi lên Work Item #${wi.id}: ` +
+                `gửi ${check.sentLen} ký tự text nhưng TFS lưu ${check.storedLen} ` +
+                `(ratio ${(check.ratio * 100).toFixed(1)}%). ` +
+                `Lưu ý: nội dung đã được PATCH lên TFS và KHÔNG thể rollback tự động — ` +
+                `vui lòng kiểm tra lại work item, có thể do giới hạn kích thước field hoặc HTML sanitizer của TFS.`,
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `✅ Đã ghi Description cho Work Item #${wi.id}: **${wi.fields['System.Title']}**\n` +
+              `Đã verify: ~${check.storedLen} ký tự text khớp (${(check.ratio * 100).toFixed(1)}% so với nội dung gửi).`,
           },
         ],
       };
